@@ -72,7 +72,7 @@ class HeatERCam(nn.Module):
                                        checkpoint=hmvit_pretrained)
         
         ### Extracting features from multiple views
-        #self.vitvq =ViTVQ((self.img_H,self.img_W))
+        self.vitvq =ViTVQ((self.img_H,self.img_W))
         self.pose_extration =get_pose_resnet(self.num_layers)
         self.pose_refine =get_pose_refine(self.input_dim)
 
@@ -263,15 +263,15 @@ class HeatERCam(nn.Module):
 
         x_feature = self.hmvit_back(x)  ######### ######### x0 torch.Size([32, 32, 64, 64]  /
 
-        #x_multi_feature =self.vitvq(x)    ################### x_multi_feature torch.Size([B,32, 64, 64])
+        x_multi_feature =self.vitvq(x)    ################### x_multi_feature torch.Size([B,32, 64, 64])
         pose_feature =self.pose_extration(x)
         pose_refine_feature =self.pose_refine(pose_feature)
         pose_feature =self.conv1(pose_refine_feature) ###################### pose_feature torch.Size([B,32, 64, 64])
  
-        #x_feature =x_feature +x_multi_feature+pose_feature
+        x_feature =x_feature +x_multi_feature+pose_feature
         
         #test pose joint feature
-        x_feature =x_feature +pose_feature
+        #x_feature =x_feature +pose_feature
 
         x0_mask = self.vit_mask(x_feature)
         #### Enhanced predictive information for joints
