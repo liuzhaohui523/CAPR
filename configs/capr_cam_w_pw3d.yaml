@@ -21,7 +21,7 @@ DATASET:
 MODEL:
   TYPE: 'HeatERCam'
   PRETRAINED: ''
-  TRY_LOAD: './model_files/feater_pretrain.pth'
+  TRY_LOAD: './model_files/capr_pretrain.pth'
   FOCAL_LENGTH: 1000
   IMAGE_SIZE:
   - 256
