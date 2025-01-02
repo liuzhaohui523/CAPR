@@ -1,16 +1,20 @@
 import numpy as np
 from typing import Union, Tuple, List, Optional
 from functools import partial
-import os
-#os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
+
 import pytorch_lightning as pl
 
 import torch
 import torch.nn as nn
-
+import pickle
+import trimesh
+from smplx import SMPLX
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from timm.models.layers import DropPath
+import torch.nn.functional as F
+
 
 def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
@@ -72,6 +76,121 @@ def init_weights(m):
         w = m.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
+
+
+class NormalPredictionNetwork(nn.Module):
+    def __init__(self, input_channels, output_channels=3):
+        """
+        法线预测网络，从输入特征直接生成法线特征图。
+        :param input_channels: 输入特征的通道数
+        :param output_channels: 输出法线特征的通道数(默认3)
+        """
+        super(NormalPredictionNetwork, self).__init__()
+        self.conv1 = nn.Conv2d(input_channels, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
+        self.conv4 = nn.Conv2d(64, output_channels, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = self.conv4(x)  # 输出大小为 [B, 3, H, W]
+        # 归一化法线方向
+        norm = torch.sqrt(torch.sum(x ** 2, dim=1, keepdim=True)) + 1e-8
+        x = x / norm  # 每个像素的法线方向归一化
+        return x.contiguous()  # 保证内存连续性
+
+
+def generate_view_mask(input_features, normals, axis_vector, img_size=(64, 64), device=None):
+    """
+    使用 PyTorch 张量操作生成视角掩码，支持批处理输入。
+    :param input_features: 输入特征图 [B, C, H, W]
+    :param normals: 法线特征图 [B, 3, H, W]（直接从网络预测）
+    :param axis_vector: 视角方向向量 [3]
+    :param img_size: 掩码尺寸 (H, W)
+    :param device: 使用的设备 (默认与 input_features 一致)
+    :return: 批量掩码 [B, 1, H, W]
+    """
+    if device is None:
+        device = input_features.device
+
+    # 将 axis_vector 转为张量
+    axis_vector = torch.tensor(axis_vector, device=device).view(1, 3, 1, 1)  # [1, 3, 1, 1]
+
+    # 计算法线与视角方向的点积
+    dot_product = torch.sum(normals * axis_vector, dim=1, keepdim=True)  # [B, 1, H, W]
+
+    # 生成掩码（点积大于阈值 0.7 的区域设为 1，否则为 0）
+    mask = (dot_product > 0.7).float()  # [B, 1, H, W]
+
+    # 插值掩码到指定尺寸
+    mask = F.interpolate(mask, size=img_size, mode="bilinear", align_corners=False).contiguous()  # 保证内存连续性
+    return mask
+
+
+class SideViewFeatureExtractor(nn.Module):
+    def __init__(self, input_channels, feature_channels=32, output_channels=3):
+        """
+        基于视角掩码提取侧视图特征。
+        :param input_channels: 输入特征的通道数
+        :param feature_channels: 中间层的特征通道数
+        :param output_channels: 输出特征的通道数
+        """
+        super(SideViewFeatureExtractor, self).__init__()
+        self.conv1 = nn.Conv2d(input_channels, feature_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(feature_channels, output_channels, kernel_size=3, padding=1)
+
+    def forward(self, input_features, mask):
+        # 应用掩码
+        masked_features = (input_features * mask).contiguous()  # [B, C, H, W]，保证连续性
+        # 提取特征
+        x = F.relu(self.conv1(masked_features))
+        x = torch.sigmoid(self.conv2(x))
+        return x.contiguous()  # 保证内存连续性
+
+
+def extract_smpl_sideview_features(input_features, normal_net, img_size=(64, 64), output_size=(256, 256)):
+    """
+    从输入特征中提取 SMPL-X 的左、右和后视图特征。
+    :param input_features: 输入特征图 [B, C, H, W]
+    :param normal_net: 法线预测网络
+    :param img_size: 掩码生成的尺寸 (H, W)
+    :param output_size: 输出特征的最终尺寸 (H, W)
+    :return: 包含各视角特征的字典，格式与示例一致
+    """
+    # 添加类型检查
+    if not isinstance(input_features, torch.Tensor):
+        raise TypeError(f"Expected input_features to be a PyTorch tensor, but got {type(input_features)}")
+
+    # 获取设备
+    device = input_features.device if isinstance(input_features, torch.Tensor) else next(normal_net.parameters()).device
+
+    # 1. 使用法线预测网络生成法线
+    normals = normal_net(input_features).contiguous()  # [B, 3, H, W]，保证连续性
+
+    # 2. 初始化特征提取器
+    extractor = SideViewFeatureExtractor(input_channels=input_features.shape[1]).to(device)
+
+    # 3. 定义视角方向向量
+    axis_vectors = {
+        'T_normal_B': [0, 0, -1],  # 后视图方向
+        'T_normal_R': [1, 0, 0],   # 右视图方向
+        'T_normal_L': [-1, 0, 0],  # 左视图方向
+    }
+
+    # 4. 提取每个视角的特征并存储到字典
+    smpl_normal = {}
+    for name, axis_vector in axis_vectors.items():
+        mask = generate_view_mask(input_features, normals, axis_vector, img_size=img_size, device=device)  # [B, 1, H, W]
+        features = extractor(input_features, mask)  # [B, C, H, W]
+        features = F.interpolate(features, size=output_size, mode="bilinear", align_corners=False).contiguous()  # 保证连续性
+        smpl_normal[name] = features  # 保存特征到字典
+
+    return smpl_normal
+
+
+
 class PreNorm(nn.Module):
     def __init__(self, dim: int, fn: nn.Module) -> None:
         super().__init__()
@@ -111,62 +230,7 @@ class FeedForward(nn.Module):
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
         return self.net(x).contiguous()
 
-class MultiViewTransformationNet(nn.Module):
-    """
-    MultiViewTransformationNet Perspective Transformation Network
-    It is used to generate output images of
-    three different perspectives (back view, right view and left view) from the input image.
-    """
-    def __init__(self):
-        super(MultiViewTransformationNet, self).__init__()
-        # 公共卷积层
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
 
-        # 共享反卷积层
-        self.deconv1 = nn.ConvTranspose2d(in_channels=64, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.deconv2 = nn.ConvTranspose2d(in_channels=32, out_channels=16, kernel_size=3, stride=1, padding=1)
-        self.deconv3 = nn.ConvTranspose2d(in_channels=16, out_channels=3, kernel_size=3, stride=1, padding=1)
-
-        # 激活函数
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        # 输入
-        skip = x  # 跳跃连接的输入
-
-        # 公共卷积层前向传播
-        x = self.relu(self.conv1(x)).contiguous()
-        x = self.relu(self.conv2(x)).contiguous()
-        x = self.relu(self.conv3(x)).contiguous()
-
-        # 后视图分支
-        back = self.relu(self.deconv1(x)).contiguous()
-        back = self.relu(self.deconv2(back)).contiguous()
-        back = self.deconv3(back).contiguous()
-        back += skip.contiguous()
-
-        # 右视图分支
-        right = self.relu(self.deconv1(x)).contiguous()
-        right = self.relu(self.deconv2(right)).contiguous()
-        right = self.deconv3(right).contiguous()
-        right += skip.contiguous()
-
-        # 左视图分支
-        left = self.relu(self.deconv1(x)).contiguous()
-        left = self.relu(self.deconv2(left)).contiguous()
-        left = self.deconv3(left).contiguous()
-        left += skip.contiguous()
-
-        # 将结果存入字典
-        smpl_normal = {
-            'T_normal_B': back.contiguous(),
-            'T_normal_R': right.contiguous(),
-            'T_normal_L': left.contiguous()
-        }
-
-        return smpl_normal
 
 def split_chunks(x, chunk_size):
     """
@@ -554,10 +618,11 @@ class ViTVQ(pl.LightningModule):
     def __init__(self, image_size=256, patch_size=16, channels=3) -> None:
         super().__init__()
 
-        #视图转换网络
-        self.view_transform_net = MultiViewTransformationNet()
 
         # image_size = (x.shape[2], x.shape[3])
+        self.normal_net =NormalPredictionNetwork(input_channels=32)
+        # 禁用法线预测网络的参数梯度更新
+            
         self.encoder = ViTEncoder(image_size=image_size, patch_size=patch_size, dim=256, depth=4, heads=4, mlp_dim=1024,
                                   channels=channels)
         self.F_decoder = ViTDecoder(image_size=image_size, patch_size=patch_size, dim=256, depth=2, heads=4,
@@ -573,13 +638,9 @@ class ViTVQ(pl.LightningModule):
         self.Multi_decoder =Multi_In_Out_Block(dim=32, num_heads=4,qkv_bias=True)
 
 
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        enc_out = self.encode(x).contiguous()           #[2,256,256] 准确来说应该是[b,256,256]
-        
-
-        smpl_normal = self.view_transform_net(x)
-
-
+    def forward(self, x: torch.FloatTensor,input_features) -> torch.FloatTensor:
+        enc_out = self.encode(x).contiguous()           #[2,256,256] 准确来说应该是[b,256,256] 
+        smpl_normal = extract_smpl_sideview_features(input_features=input_features,normal_net=self.normal_net)
         dec = self.decode(enc_out.contiguous(),smpl_normal)
         dec = self.fuse(dec).contiguous()
 
@@ -624,9 +685,17 @@ class ViTVQ(pl.LightningModule):
 
 
 if __name__ == "__main__":
-    x = torch.randn(1, 3, 256, 256).cuda()
+    x = torch.randn(1, 3, 256, 256)
     if x.is_cuda:
         print("张量在 GPU 上")
     else:
         print("张量在 CPU 上")
     print("张量 x 在设备:", x.device)
+    model =ViTVQ()
+
+    input_features = torch.randn(1, 32, 64, 64)
+    dec = model(x, input_features)
+    print(dec.shape)
+    print(dec.is_contiguous())
+
+
