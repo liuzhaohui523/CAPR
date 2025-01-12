@@ -265,7 +265,7 @@ class HeatERCam(nn.Module):
 
         x_multi_feature =self.vitvq(x,x_feature)    ################### x_multi_feature torch.Size([B,32, 64, 64])
         pose_feature =self.pose_extration(x)
-        #pose_refine_feature =self.pose_refine(pose_feature)
+        pose_refine_feature =self.pose_refine(pose_feature)
         pose_feature =self.conv1(pose_feature) ###################### pose_feature torch.Size([B,32, 64, 64])
  
         x_feature =x_feature +x_multi_feature+pose_feature
