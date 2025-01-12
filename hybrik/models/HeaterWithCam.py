@@ -74,7 +74,7 @@ class HeatERCam(nn.Module):
         ### Extracting features from multiple views
         self.vitvq =ViTVQ((self.img_H,self.img_W))
         self.pose_extration =get_pose_resnet(self.num_layers)
-        self.pose_refine =get_pose_refine(self.input_dim)
+        # self.pose_refine =get_pose_refine(self.input_dim)
 
         self.conv1 =nn.Conv2d(in_channels=17,out_channels=32,kernel_size=1,stride=1,padding=0)
 
@@ -263,10 +263,10 @@ class HeatERCam(nn.Module):
 
         x_feature = self.hmvit_back(x)  ######### ######### x0 torch.Size([32, 32, 64, 64]  /
 
-        x_multi_feature =self.vitvq(x)    ################### x_multi_feature torch.Size([B,32, 64, 64])
+        x_multi_feature =self.vitvq(x,x_feature)    ################### x_multi_feature torch.Size([B,32, 64, 64])
         pose_feature =self.pose_extration(x)
-        pose_refine_feature =self.pose_refine(pose_feature)
-        pose_feature =self.conv1(pose_refine_feature) ###################### pose_feature torch.Size([B,32, 64, 64])
+        #pose_refine_feature =self.pose_refine(pose_feature)
+        pose_feature =self.conv1(pose_feature) ###################### pose_feature torch.Size([B,32, 64, 64])
  
         x_feature =x_feature +x_multi_feature+pose_feature
         
@@ -437,3 +437,5 @@ class HeatERCam(nn.Module):
         )
 
         return output
+
+

@@ -112,6 +112,102 @@ class PoseAttention(nn.Module):
 
         return output
 
+# class PoseAttention(nn.Module):
+#     def __init__(self, input_dim, d_model=256, n_heads=4, chunk_size=32, initial_mask_ratio=0.5, decay_rate=0.00005):
+#         super(PoseAttention, self).__init__()
+#         self.n_heads = n_heads
+#         self.d_k = d_model // n_heads
+#         self.d_model = d_model
+#         self.chunk_size = chunk_size
+
+#         # 初始遮蔽比例和衰减率
+#         self.initial_mask_ratio = initial_mask_ratio
+#         self.decay_rate = decay_rate
+#         self.current_mask_ratio = initial_mask_ratio
+#         self.step_count = 0  # 内部计数器
+
+#         # 输入投影层，将输入的通道数映射到 d_model 维度
+#         self.input_proj = nn.Conv2d(input_dim, d_model, kernel_size=1) if input_dim != d_model else nn.Identity()
+
+#         # 位置编码
+#         self.pos_encoder = PositionalEncoding2D(d_model)
+
+#         # 线性层用于生成 query, key, value
+#         self.w_q = nn.Linear(d_model, d_model)
+#         self.w_k = nn.Linear(d_model, d_model)
+#         self.w_v = nn.Linear(d_model, d_model)
+
+#         # 最终输出的线性变换
+#         self.fc = nn.Linear(d_model, d_model)
+
+#     def update_attention_mask_ratio(self):
+#         """
+#         根据模型内部的计数器更新注意力遮蔽比例，使得注意力逐渐扩展。
+#         每 10 个步骤更新一次遮蔽比例，确保遮蔽扩展速度较慢。
+#         """
+#         if self.step_count % 10 == 0:  # 每 10 个 step 更新一次遮蔽比例
+#             self.current_mask_ratio = max(0, self.initial_mask_ratio - self.decay_rate * self.step_count)
+#         self.step_count += 1
+
+#     def split_chunks(self, x, chunk_size):
+#         """
+#         将输入张量分块
+#         """
+#         B, T, C = x.shape
+#         return x.view(B, T // chunk_size, chunk_size, C).transpose(1, 2).contiguous().view(-1, chunk_size, C)
+
+#     def forward(self, pose_features):
+#         # 更新注意力遮蔽比例
+#         self.update_attention_mask_ratio()
+
+#         # 输入是 [B, C, H, W]
+#         B, C, H, W = pose_features.shape
+
+#         # 1. 将输入通道数映射到 d_model 维度
+#         x = self.input_proj(pose_features)  # [B, d_model, H, W]
+
+#         # 2. 添加位置编码
+#         x = self.pos_encoder(x)  # [B, d_model, H, W]
+
+#         # 3. 分块处理空间维度以减少计算量
+#         chunk_size = self.chunk_size
+#         H_chunks = H // chunk_size
+#         W_chunks = W // chunk_size
+
+#         x = x.view(B, self.d_model, H_chunks, chunk_size, W_chunks, chunk_size)  # [B, d_model, H_chunks, chunk_size, W_chunks, chunk_size]
+#         x = x.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, self.d_model, chunk_size * chunk_size)  # [B * H_chunks * W_chunks, d_model, chunk_size * chunk_size]
+#         x = x.permute(0, 2, 1)  # [B * H_chunks * W_chunks, chunk_size * chunk_size, d_model]
+
+#         # 4. 线性映射并分块处理
+#         q_chunks = self.split_chunks(self.w_q(x), chunk_size)  # [num_chunks, chunk_size, d_model]
+#         k_chunks = self.split_chunks(self.w_k(x), chunk_size)  # [num_chunks, chunk_size, d_model]
+#         v_chunks = self.split_chunks(self.w_v(x), chunk_size)  # [num_chunks, chunk_size, d_model]
+
+#         attn_chunks = []
+#         for q_chunk, k_chunk, v_chunk in zip(q_chunks, k_chunks, v_chunks):
+#             # 计算注意力权重
+#             attn_chunk = (q_chunk @ k_chunk.transpose(-2, -1)) * (1.0 / torch.sqrt(torch.tensor(self.d_k, dtype=torch.float32)))
+
+#             # 生成随机掩蔽矩阵并应用
+#             mask = (torch.rand(attn_chunk.shape, device=attn_chunk.device) > self.current_mask_ratio).float()
+#             attn_chunk = attn_chunk * mask + (mask == 0) * -1e9  # 应用掩蔽
+
+#             # 计算注意力输出
+#             attn_chunk = F.softmax(attn_chunk, dim=-1)
+#             attn_chunk = torch.matmul(attn_chunk, v_chunk)  # [num_chunks, chunk_size, d_k]
+#             attn_chunks.append(attn_chunk)
+
+#         # 将所有分块的注意力输出拼接
+#         attn_output = torch.cat(attn_chunks, dim=0)  # [B * H_chunks * W_chunks, chunk_size, d_model]
+
+#         # 5. 恢复空间维度
+#         attn_output = attn_output.view(B, H_chunks, W_chunks, chunk_size, chunk_size, self.d_model)  # [B, H_chunks, W_chunks, chunk_size, chunk_size, d_model]
+#         attn_output = attn_output.permute(0, 5, 1, 3, 2, 4).contiguous()  # [B, d_model, H, W]
+#         output = attn_output.view(B, self.d_model, H, W)  # [B, d_model, H, W]
+#         output = self.fc(output.permute(0, 2, 3, 1))  # [B, H, W, d_model]
+#         output = output.permute(0, 3, 1, 2)  # [B, d_model, H, W]
+
+#         return output
     
 
 class PoseEncoderLayer(nn.Module):

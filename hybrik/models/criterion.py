@@ -3,30 +3,6 @@ import torch.nn as nn
 
 from .builder import LOSS
 
-
-#最初的计算关节的损失，使用的是MSE
-"""
-class JointsMSELoss(nn.Module):
-    def __init__(self):
-        super(JointsMSELoss, self).__init__()
-        self.criterion = nn.MSELoss(reduction='mean')
-
-    def forward(self, output, target):
-        batch_size = output.size(0)
-        num_joints = output.size(1)
-        heatmaps_pred = output.reshape((batch_size, num_joints, -1)).split(1, 1)
-        heatmaps_gt = target.reshape((batch_size, num_joints, -1)).split(1, 1)
-        loss = 0
-
-        for idx in range(num_joints):
-            heatmap_pred = heatmaps_pred[idx].squeeze()
-            heatmap_gt = heatmaps_gt[idx].squeeze()
-
-            loss += 0.5 * self.criterion(heatmap_pred, heatmap_gt)
-
-        return loss / num_joints
-"""
-
 class JointsCrossEntropyDiceLoss(nn.Module):
     def __init__(self,Bce_weight,Dice_weight):
         super(JointsCrossEntropyDiceLoss, self).__init__()
@@ -86,29 +62,6 @@ def weighted_l1_loss(input, target, weights, size_average):
         return out.sum()
 
 
-#原来的MSE计算视图之间的损失
-"""
-class MultiViewLoss(nn.Module):
-    def __init__(self, weights=None):
-        super(MultiViewLoss, self).__init__()
-        self.criterion = nn.MSELoss(reduction='mean')  # Default is 'mean'
-        self.weights = weights if weights else [0.1, 0.1, 0.1]
-
-    def forward(self, output, target):
-        dec_B, dec_R, dec_L = output
-        target_B, target_R, target_L = target
-
-        loss_B = self.criterion(dec_B, target_B)
-        loss_R = self.criterion(dec_R, target_R)
-        loss_L = self.criterion(dec_L, target_L)
-
-        # Weighted sum of multi-view losses
-        total_loss = (self.weights[0] * loss_B +
-                      self.weights[1] * loss_R +
-                      self.weights[2] * loss_L)
-
-        return total_loss  # Already averaged per batch and views
-"""
 #新的BerHu的损失计算
 class BerHu_loss(nn.Module):
     def __init__(self, c=0.2, ignore_index=255):
@@ -141,26 +94,26 @@ class BerHu_loss(nn.Module):
 
 
 
-# class MultiViewLoss(nn.Module):
-#     def __init__(self, weights=None,c=0.2, ignore_index=255):
-#         super(MultiViewLoss, self).__init__()
-#         self.criterion = BerHu_loss(c=c, ignore_index=ignore_index)
-#         self.weights = weights if weights else [0.1, 0.1, 0.1]
+class MultiViewLoss(nn.Module):
+    def __init__(self, weights=None,c=0.2, ignore_index=255):
+        super(MultiViewLoss, self).__init__()
+        self.criterion = BerHu_loss(c=c, ignore_index=ignore_index)
+        self.weights = weights if weights else [0.1, 0.1, 0.1]
 
-#     def forward(self, output, target):
-#         dec_B, dec_R, dec_L = output
-#         target_B, target_R, target_L = target
+    def forward(self, output, target):
+        dec_B, dec_R, dec_L = output
+        target_B, target_R, target_L = target
 
-#         loss_B = self.criterion(dec_B, target_B)
-#         loss_R = self.criterion(dec_R, target_R)
-#         loss_L = self.criterion(dec_L, target_L)
+        loss_B = self.criterion(dec_B, target_B)
+        loss_R = self.criterion(dec_R, target_R)
+        loss_L = self.criterion(dec_L, target_L)
 
-#         # Weighted sum of multi-view losses
-#         total_loss = (self.weights[0] * loss_B +
-#                       self.weights[1] * loss_R +
-#                       self.weights[2] * loss_L)
+        # Weighted sum of multi-view losses
+        total_loss = (self.weights[0] * loss_B +
+                      self.weights[1] * loss_R +
+                      self.weights[2] * loss_L)
 
-#         return total_loss  # Already averaged per batch and views
+        return total_loss  # Already averaged per batch and views
         
 
 
@@ -241,7 +194,7 @@ class L1LossDimSMPLCam(nn.Module):
         self.vertice_weight = self.elements['VERTICE_WEIGHT']
         self.twist_weight = self.elements['TWIST_WEIGHT']
         self.heatmap_weight = self.elements['HEATMAP_WEIGHT']
-        #self.view_weight =self.elements['VIEW_WEIGHT']
+        self.view_weight =self.elements['VIEW_WEIGHT']
         self.bce_weight =self.elements['BCE_WEIGHT']
         self.dice_weight =self.elements['DICE_WEIGHT']
         self.criterion_smpl = nn.MSELoss()
@@ -255,7 +208,7 @@ class L1LossDimSMPLCam(nn.Module):
 
 
         # 创建 MultiViewLoss 实例
-        #self.multi_view_loss = MultiViewLoss()
+        self.multi_view_loss = MultiViewLoss()
 
 
     def phi_norm(self, pred_phis):
@@ -299,13 +252,13 @@ class L1LossDimSMPLCam(nn.Module):
         heatmap_loss = self.joints_cross_dice_loss(output.uvd_heatmap, labels['uvd_heatmap'])
 
         # 计算多视图损失
-        # output_views = (output.initial_view_B, output.initial_view_R, output.initial_view_L)
-        # target_views = (labels['initial_view_B'], labels['initial_view_R'], labels['initial_view_L'])
-        # view_loss = self.multi_view_loss(output_views, target_views)
+        output_views = (output.initial_view_B, output.initial_view_R, output.initial_view_L)
+        target_views = (labels['initial_view_B'], labels['initial_view_R'], labels['initial_view_L'])
+        view_loss = self.multi_view_loss(output_views, target_views)
 
         loss = loss_beta * self.beta_weight + loss_theta * self.theta_weight
         loss += loss_twist * self.twist_weight
-        #loss += view_loss * self.view_weight  # 添加多视图损失并乘以权重因子
+        loss += view_loss * self.view_weight  # 添加多视图损失并乘以权重因子
 
         if epoch_num > self.pretrain_epoch:
             loss += loss_xyz * self.xyz24_weight
